@@ -29,7 +29,12 @@ use crate::proxy::mappers::claude::models::{ContentBlock, Message, MessageConten
 /// 检查 thinking 块是否有有效签名
 fn has_valid_signature(block: &ContentBlock) -> bool {
     match block {
-        ContentBlock::Thinking { signature, .. } => {
+        ContentBlock::Thinking { signature, thinking, .. } => {
+            // 空 thinking + 任意 signature = 有效 (trailing signature case)
+            if thinking.is_empty() && signature.is_some() {
+                return true;
+            }
+            // 有内容 + 足够长度的 signature = 有效
             signature.as_ref().map_or(false, |s| s.len() >= MIN_SIGNATURE_LENGTH)
         }
         _ => true  // 非 thinking 块默认有效
@@ -80,8 +85,19 @@ fn filter_invalid_thinking_blocks(messages: &mut Vec<Message>) {
                     if has_valid_signature(&block) {
                         new_blocks.push(sanitize_thinking_block(block));
                     } else {
-                        // 删除无效的 thinking 块
-                        tracing::warn!("[Claude-Handler] Dropping thinking block with invalid/missing signature");
+                        // [IMPROVED] 保留内容转换为 text，而不是直接丢弃
+                        if let ContentBlock::Thinking { thinking, .. } = &block {
+                            if !thinking.is_empty() {
+                                tracing::info!(
+                                    "[Claude-Handler] Converting thinking block with invalid signature to text. \
+                                     Content length: {} chars",
+                                    thinking.len()
+                                );
+                                new_blocks.push(ContentBlock::Text { text: thinking.clone() });
+                            } else {
+                                tracing::debug!("[Claude-Handler] Dropping empty thinking block with invalid signature");
+                            }
+                        }
                     }
                 } else {
                     new_blocks.push(block);

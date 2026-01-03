@@ -81,8 +81,15 @@ pub fn transform_claude_request_in(
     let system_instruction = build_system_instruction(&claude_req.system, &claude_req.model);
 
     //  Map model name (Use standard mapping)
+    // [IMPROVED] 提取 web search 模型为常量，便于维护
+    const WEB_SEARCH_FALLBACK_MODEL: &str = "gemini-2.5-flash";
+
     let mapped_model = if has_web_search_tool {
-        "gemini-2.5-flash".to_string()
+        tracing::debug!(
+            "[Claude-Request] Web search tool detected, using fallback model: {}",
+            WEB_SEARCH_FALLBACK_MODEL
+        );
+        WEB_SEARCH_FALLBACK_MODEL.to_string()
     } else {
         crate::proxy::common::model_mapping::map_claude_model_to_gemini(&claude_req.model)
     };
@@ -622,11 +629,20 @@ fn build_tools(tools: &Option<Vec<Tool>>, has_web_search: bool) -> Result<Option
         let mut tool_obj = serde_json::Map::new();
 
         // [修复] 解决 "Multiple tools are supported only when they are all search tools" 400 错误
-        // 原理：Gemini v1internal 接口非常挑剔，通常不允许在同一个工具定义中混用 Google Search 和 Function Declarationsc。
+        // 原理：Gemini v1internal 接口非常挑剔，通常不允许在同一个工具定义中混用 Google Search 和 Function Declarations。
         // 对于 Claude CLI 等携带 MCP 工具的客户端，必须优先保证 Function Declarations 正常工作。
         if !function_declarations.is_empty() {
             // 如果有本地工具，则只使用本地工具，放弃注入的 Google Search
             tool_obj.insert("functionDeclarations".to_string(), json!(function_declarations));
+
+            // [IMPROVED] 记录跳过 googleSearch 注入的原因
+            if has_google_search {
+                tracing::info!(
+                    "[Claude-Request] Skipping googleSearch injection due to {} existing function declarations. \
+                     Gemini v1internal does not support mixed tool types.",
+                    function_declarations.len()
+                );
+            }
         } else if has_google_search {
             // 只有在没有本地工具时，才允许注入 Google Search
             tool_obj.insert("googleSearch".to_string(), json!({}));

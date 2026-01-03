@@ -52,6 +52,9 @@ pub struct StreamingState {
     trailing_signature: Option<String>,
     pub web_search_query: Option<String>,
     pub grounding_chunks: Option<Vec<serde_json::Value>>,
+    // [IMPROVED] Error recovery 状态追踪
+    parse_error_count: usize,
+    last_valid_state: Option<BlockType>,
 }
 
 impl StreamingState {
@@ -66,6 +69,9 @@ impl StreamingState {
             trailing_signature: None,
             web_search_query: None,
             grounding_chunks: None,
+            // [IMPROVED] 初始化 error recovery 字段
+            parse_error_count: 0,
+            last_valid_state: None,
         }
     }
 
@@ -333,6 +339,62 @@ impl StreamingState {
     /// 获取 trailing signature (仅用于检查)
     pub fn has_trailing_signature(&self) -> bool {
         self.trailing_signature.is_some()
+    }
+
+    /// 处理 SSE 解析错误，实现优雅降级
+    ///
+    /// 当 SSE stream 中发生解析错误时:
+    /// 1. 安全关闭当前 block
+    /// 2. 递增错误计数器
+    /// 3. 在 debug 模式下输出错误信息
+    pub fn handle_parse_error(&mut self, raw_data: &str) -> Vec<Bytes> {
+        let mut chunks = Vec::new();
+
+        self.parse_error_count += 1;
+
+        tracing::warn!(
+            "[SSE-Parser] Parse error #{} occurred. Raw data length: {} bytes",
+            self.parse_error_count,
+            raw_data.len()
+        );
+
+        // 安全关闭当前 block
+        if self.block_type != BlockType::None {
+            self.last_valid_state = Some(self.block_type);
+            chunks.extend(self.end_block());
+        }
+
+        // Debug 模式下输出详细错误信息
+        #[cfg(debug_assertions)]
+        {
+            let preview = if raw_data.len() > 100 {
+                format!("{}...", &raw_data[..100])
+            } else {
+                raw_data.to_string()
+            };
+            tracing::debug!("[SSE-Parser] Failed chunk preview: {}", preview);
+        }
+
+        // 错误率过高时发出警告
+        if self.parse_error_count > 5 {
+            tracing::error!(
+                "[SSE-Parser] High error rate detected ({} errors). Stream may be corrupted.",
+                self.parse_error_count
+            );
+        }
+
+        chunks
+    }
+
+    /// 重置错误状态 (recovery 后调用)
+    pub fn reset_error_state(&mut self) {
+        self.parse_error_count = 0;
+        self.last_valid_state = None;
+    }
+
+    /// 获取错误计数 (用于监控)
+    pub fn get_error_count(&self) -> usize {
+        self.parse_error_count
     }
 }
 
